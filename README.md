@@ -1,99 +1,164 @@
-# LEDGER-Credit-Risk-Engine
-Markdown# Iron Bank: Credit Risk & MSME Scorecard Engine
+# LEDGER, Phase 1: MSME Credit Risk Data Pipeline
 
-[![Python 3.14](https://img.shields.io/badge/Python-3.14%2B-blue.svg)](https://www.python.org/)
-[![Database SQLite3](https://img.shields.io/badge/Database-SQLite3-lightgrey.svg)](https://www.sqlite.org/)
-[![License MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Framework Basel_III_IFRS9](https://img.shields.io/badge/Standards-Basel%20III%20%2F%20RBI%20IRAC-orange.svg)](#)
+An audited, leakage-aware data pipeline for a synthetic portfolio of 50,000 Indian MSME loans. It is the first phase of **LEDGER**, an IFRS 9 expected credit loss (ECL) engine.
 
-An institutional-grade credit risk modeling, feature engineering, and scorecard engine designed for commercial lending and Indian MSME portfolios. 
-
-The architecture enforces strict regulatory hygiene (RBI IRAC asset norms, Basel III probability-of-default frameworks), zero-leakage pipeline design, and defensive mathematical validation.
+![Python](https://img.shields.io/badge/Python-3.10%2B-blue) ![pandas](https://img.shields.io/badge/pandas-data%20engineering-informational) ![SQLite](https://img.shields.io/badge/SQLite-persistence-lightgrey) ![Status](https://img.shields.io/badge/Phase%201-complete-brightgreen)
 
 ---
 
-## Architecture Overview
+## Overview
 
-Raw MSME Portfolio (50,000 Credit Facilities)
-│
-▼
-┌────────────────────────────────────────────────────────┐
-│  Phase 1: Ingestion, Audit & Defensive Cleaning        │
-│  - Primary Key (loan_id) uniqueness enforcement      │
-│  - Date parsing dry-run audit                          │
-│  - Target leakage quarantine (irac_stage, dpd)     │
-│  - Fail-safe ordinal mapping with assertion traps      │
-└────────────────────────────┬───────────────────────────┘
-│
-▼
-┌────────────────────────────────────────────────────────┐
-│  Phase 1: Financial Coverage Ratio Engineering         │
-│  - Pre-division turnover zero-checks (anti-inf guards) │
-│  - Debt-to-Income: Loan-to-Turnover                    │
-│  - Debt Serviceability: Annualized Interest Burden     │
-└────────────────────────────┬───────────────────────────┘
-│
-▼
-┌────────────────────────────────────────────────────────┐
-│  Persistence Layer & Physical Storage Verification     │
-│  - Relational mapping to table: baseline_portfolio   │
-│  - SQLite write verification (Disk byte size audit)    │
-│  - SQL read-back query for row-count parity (50k == 50k)│
-└────────────────────────────┬───────────────────────────┘
-│
-▼
-Ready for Phase 2: Borrower-Group Split, EDA & WoE/IV
----
+Phase 1 turns a raw loan CSV into a trusted SQLite table (`baseline_portfolio`) that the modelling phases can use without re-checking it. It covers ingestion, a read-only quality audit, cleaning, ratio engineering, persistence, and read-back verification.
 
-## Phase 1 Detailed Implementation
+The pipeline follows one principle: **a silent failure is worse than a loud one.** A crash gets fixed the same day. A wrong number that flows downstream gets found in the model validation report, or never. Every point in the pipeline where pandas or SQLite would fail quietly has an explicit check that halts the run.
 
-### 1. Ingestion & Schema Auditing
-* **Index Uniqueness:** Enforces `loan_id` as the primary index upon ingest. The script executes a hard-halt assertion if `df.index.is_unique` evaluates to `False`, eliminating duplicate loan keys before in-memory processing.
-* **Non-Destructive Date Auditing:** Evaluates `disbursement_date` using a throwaway `pd.to_datetime(errors='coerce')` dry-run to identify and quantify unparseable string formats prior to dataframe mutation.
-* **Duplicate Record Flagging:** Audits multi-facility redundancy using subset matching across `['borrower_id', 'disbursement_date', 'loan_amount', 'interest_rate', 'tenure_months']` to detect re-keyed credit facilities.
+## Dataset
 
-### 2. Supervisory Target Leakage Quarantine
-During regulatory audits, allowing post-origination supervisory classifications into predictive scorecards leads to synthetic model inflation.
-* **IRAC Stage Cross-Tabulation:** Cross-tabulating `irac_stage` against `default_flag` revealed deterministic target alignment (NPA directly maps to default).
-* **DPD Numeric Mirroring:** Auditing `dpd_current` across IRAC stages showed non-overlapping interval ranges, proving that current days-past-due is simply `irac_stage` in numeric form.
-* **Architectural Decision:** Both `irac_stage` and `dpd_current` are persisted in the SQLite warehouse for historical portfolio audits, but are strictly quarantined from all downstream predictive feature pools.
+| Item | Value |
+|---|---|
+| Source | Synthetic portfolio, no real borrower data |
+| Loans | 50,000 |
+| Borrowers | 28,566 (several loans per borrower) |
+| Raw columns | 30 (plus `loan_id` as the index) |
+| Target | `default_flag`, 6.76% default rate (3,379 loans) |
+| Design | Calibrated to Indian regulatory frameworks: Udyam MSME classification, IRAC asset-classification stages, macro-conditioned scenarios (Baseline, Adverse, Severe) |
 
-### 3. Fail-Safe Ordinal & Categorical Normalization
-* **Text Normalization:** Fields `collateral_type` and `loan_purpose` undergo whitespace stripping, uppercase normalization, and explicit conversion to pandas `category` dtypes.
-* **CIBIL MSME Rank (CMR):** Cleaned string values by removing the `'CMR'` prefix and cast through numeric coercion with error halts.
-* **Strict Assertion Mapping (`encode_ordinal`):** Standard `.map()` methods in pandas silently assign `NaN` to unmapped keys. A custom encoding wrapper counts post-mapping nulls and raises an immediate execution halt if an unexpected categorical level appears.
+## Pipeline
 
-```python
-# Fail-safe mapping design pattern
-def encode_ordinal(series, mapping, name):
-    encoded = series.map(mapping)
-    n_null = encoded.isnull().sum()
-    if n_null > 0:
-        raise ValueError(f"STOP: {n_null} unmapped values detected in {name}")
-    return encoded.astype(int)
-4. Defensive Ratio EngineeringFinancial ratios with turnover in the denominator are susceptible to floating-point division-by-zero errors ($\pm\infty$ states).Zero-Turnover Barrier: The pipeline audits (df['annual_turnover'] == 0).sum(). If detected, execution halts before division executes.Engineered Metrics:Loan-to-Turnover: Evaluates exposure relative to operational cash flow scale:$$\text{Loan to Turnover} = \frac{\text{Loan Amount}}{\text{Annual Turnover}}$$Annualized Interest Burden: Assesses the business's direct finance cost coverage:$$\text{Interest Burden} = \frac{\text{Loan Amount} \times \left(\frac{\text{Interest Rate}}{100}\right)}{\text{Annual Turnover}}$$5. Relational Persistence & Physical Read-Back AuditRather than assuming an un-errored .to_sql() call equates to physical persistence, the pipeline conducts a two-stage verification:Physical Disk Size: Asserts that the physical file size of credit_risk_modelling.db is greater than 0 MB (typically ~13 MB for this 50,000-row portfolio).SQL Count Parity: Connects independently to the SQLite engine and queries SELECT COUNT(*) FROM baseline_portfolio, verifying that the table row count precisely matches the in-memory dataframe length.Data Dictionary (Phase 1 Baseline)Field NameTypeCategoryDescription / Defensive Treatmentloan_idTEXTIdentifierPrimary Key index; enforced unique checkborrower_idTEXTIdentifierEntity identifier; links multi-facility borrowersdisbursement_dateDATETIMETemporalValidated via dry-run parsingannual_turnoverREALFinancialGross annual revenue; zero-division barrierloan_amountREALExposureTotal principal sanctionedinterest_rateREALPricingAnnual interest rate (percentage)cibil_msme_rankINTEGERCredit BureauOrdinal scale (1 = Best, 10 = Worst)macro_scenarioINTEGERMacroeconomicEncoded: Baseline (0), Adverse (1), Severe (2)irac_stageINTEGERSupervisoryStandard (1) to NPA (5); Quarantineddpd_currentINTEGERBehavioralCurrent days past due; Quarantinedloan_to_turnoverREALEngineered RatioRatio of debt to annual revenue capacityinterest_burdenREALEngineered RatioAnnual interest obligation relative to turnoverdefault_flagINTEGERTarget VariableGround truth: 0 = Non-Default, 1 = DefaultProject StructurePlaintextiron-bank-credit-risk-engine/
-│
+```
+CSV  ->  Ingest  ->  Audit (read-only)  ->  Clean  ->  Ratios  ->  SQLite  ->  Verify
+```
+
+| Stage | What it does | Changes the data? |
+|---|---|---|
+| Ingest | Loads the CSV with `loan_id` as the index and prints shape, dtypes and info | No |
+| Audit | Checks dates, nulls, key uniqueness, duplicates, class balance and leakage | No |
+| Clean | Fixes dtypes, normalises labels and encodes ordinal columns | Yes |
+| Ratios | Builds `loan_to_turnover` and `interest_burden` | Yes |
+| Persist | Writes the `baseline_portfolio` table to SQLite | No |
+| Verify | Reads the row count and file size back and compares them to the dataframe | No |
+
+## Design decisions
+
+### 1. The audit is read-only
+The audit never assigns results back to the dataframe. For example, dates are parsed into a throwaway variable to count the bad ones, and the real conversion happens in cleaning. This keeps the diagnosis separate from the fix, so the raw state of the data can always be shown.
+
+### 2. Every silent failure has an explicit check
+
+| Failure | Behaviour | Guard |
+|---|---|---|
+| `Series.map()` with a missing key | Returns `NaN` without raising an error | Count nulls after mapping and halt |
+| Division by zero in pandas | Returns `inf`, no error | Check for zero turnover before dividing |
+| `NaN` cast with `.astype(int)` | Raises an error | `to_numeric(errors="coerce")`, check for `NaN`, then cast |
+| `sqlite3.connect()` on a wrong path | Creates an empty database | Anchor the path to the script folder, then read back `COUNT(*)` and file size |
+| Duplicate `loan_id` | Corrupts counts and joins | `index.is_unique` check that halts |
+
+### 3. A write is trusted only after it is read back
+During development the script printed "persisted successfully" while writing an empty 0 MB database in the wrong folder, because the path was relative. Success only meant that no exception was raised. The pipeline now anchors both paths to the script's folder and, after writing, compares `SELECT COUNT(*)` with `len(df)`. A mismatch halts the run.
+
+### 4. Duplicate detection runs at two levels
+- Primary key: `loan_id` must be unique.
+- Business key: the same loan keyed twice under different IDs, checked on `borrower_id`, `disbursement_date`, `loan_amount`, `interest_rate` and `tenure_months`, with `keep=False` so every copy can be inspected.
+
+A unique `loan_id` alone does not prove there are no duplicate loans.
+
+## Target leakage findings
+
+Two columns are excluded from every feature set. The bank only knows them after the outcome, so a model using them would look perfect in testing and fail in production.
+
+| Column | Evidence | Verdict |
+|---|---|---|
+| `irac_stage` | A crosstab against `default_flag` shows NPA is exactly the default class | Defines the target. Excluded from features. Kept in the database for IFRS 9 staging. |
+| `dpd_current` | Days-past-due ranges per stage do not overlap (Standard 0, SMA-0 1-30, SMA-1 31-60, SMA-2 61-90, NPA 91-150) | The same information as `irac_stage` in numeric form. Excluded from features. |
+
+The leakage check runs **before** `irac_stage` is encoded into numbers, so the evidence is read from the original labels.
+
+Two timing assumptions are recorded for later phases:
+- **A1:** `days_past_due_history_12m` is a pre-origination window.
+- **A2:** `cibil_msme_rank` is as of origination.
+
+## Class imbalance
+
+At 6.76% default, a model that predicts "no default" for every loan scores 93.24% accuracy and catches no defaulters. Accuracy is therefore not used. Later phases evaluate with ROC-AUC, Gini, precision-recall, KS and calibration, because IFRS 9 needs the predicted probabilities to be correct as probabilities, not only well ranked.
+
+## Data cleaning
+
+| Column | Step | Why |
+|---|---|---|
+| `disbursement_date` | `to_datetime` | The audit confirmed every date parses |
+| `sector`, `udyam_category` | Category dtype | Nominal labels |
+| `collateral_type`, `loan_purpose` | `strip().upper()`, then category | Variants such as `"SECURED"`, `" unsecured"` and `"Secured "` would otherwise split into separate categories |
+| `cibil_msme_rank` | `"CMR5"` to `5` via `to_numeric`, null check, then `int` | `.astype(int)` crashes on `NaN` |
+| `macro_scenario` | Baseline 0, Adverse 1, Severe 2 | The order is real (increasing stress) |
+| `irac_stage` | Standard 1 to NPA 5 | Ordered delinquency stages |
+
+## Ratio engineering
+
+| Feature | Formula | Note |
+|---|---|---|
+| `loan_to_turnover` | `loan_amount / annual_turnover` | Loan size scaled by business size |
+| `interest_burden` | `loan_amount * interest_rate / 100 / annual_turnover` | A simplified annual interest burden. It ignores tenure and amortisation. |
+
+The dataset does not contain the inputs for a true DSCR or debt-to-income, so these are documented **proxy ratios**, not regulatory metrics. A zero-turnover check halts the pipeline before any division.
+
+## Repository structure
+
+```
+.
 ├── data/
-│   ├── final_macro_conditioned_msme_portfolio_50k.csv  # Raw ingest file (gitignored)
-│   └── credit_risk_modelling.db                       # Persisted SQLite warehouse (gitignored)
-│
-├── src/
-│   ├── phase1_pipeline.py                             # Ingestion, audit, cleaning & persistence
-│   └── phase2_level1_eda.py                           # Borrower-grouped split, Spearman & VIF
-│
-├── docs/
-│   └── DECISIONS.md                                   # Comprehensive feature selection audit log
-│
-├── .gitignore                                         # Prevents committing data & database blobs
-├── README.md                                          # Technical documentation
-└── requirements.txt                                   # Python environment dependencies
-Installation & ReplicationPrerequisitesPython 3.10+ (Tested on Python 3.14)SQLite3SetupClone the repository:Bashgit clone [https://github.com/](https://github.com/)<YOUR_USERNAME>/iron-bank-credit-risk-engine.git
-cd iron-bank-credit-risk-engine
-Set up a virtual environment (recommended):Bashpython -m venv venv
-# Windows:
-venv\Scripts\activate
-# macOS/Linux:
-source venv/bin/activate
-Install required libraries:Bashpip install pandas numpy matplotlib scikit-learn
-Run the Phase 1 pipeline:Bashpython src/phase1_pipeline.py
-Roadmap[x] Phase 1: Data Infrastructure & Defensive EngineeringTarget leakage identification and quarantineFail-safe categorical encoding and zero-division defensesSQLite persistence layer with physical verification[ ] Phase 2: Statistical EDA & Multicollinearity AuditingBorrower-level Group Shuffle Split (80/20 train/test isolation)Spearman rank correlation analysis across risk tiersCollinearity diagnostic via matrix-inversion Variance Inflation Factor (VIF)[ ] Phase 3: Weight of Evidence (WoE) & Information Value (IV)Monotonic optimal binning across financial ratiosInformation Value ranking and predictive strength segmentation[ ] Phase 4: Regulatory Scorecard DevelopmentLogistic Regression scorecard fittingScaling via Points-to-Double-Odds (PDO) framework (300–900 score range)Cut-off calibration and confusion matrix validation
+│   └── final_macro_conditioned_msme_portfolio_50k.csv
+├── Credit_Risk_Modelling.py        # Phase 1 pipeline
+├── credit_risk_modelling.db        # created by the script (about 13 MB)
+└── README.md
+```
+
+## How to run
+
+```bash
+pip install pandas
+python Credit_Risk_Modelling.py
+```
+
+The script finds its files relative to its own location, so it runs from any working directory. It uses only `pandas` and the Python standard library (`sqlite3`, `os`, `sys`).
+
+**Expected output at the end of a run**
+
+```
+DB size (MB): ~13
+Rows in baseline_portfolio: 50000
+```
+
+If the file size is 0 or the row count is wrong, the script halts with a critical message instead of reporting success.
+
+## Output
+
+| Item | Value |
+|---|---|
+| Table | `baseline_portfolio` |
+| Rows | 50,000 |
+| Columns | 32 (30 raw plus 2 engineered ratios, with `loan_id` as the index) |
+| Nulls | 0 |
+| Handed to Phase 2 | A split by borrower, because 28,566 borrowers hold the 50,000 loans |
+
+## Limitations
+
+- The data is synthetic. Relationships between features and default reflect the generator, not real MSME behaviour.
+- The engineered ratios are proxies and ignore tenure and amortisation.
+- This phase audits and prepares the data. It does not fit any model.
+
+## Roadmap
+
+| Phase | Scope | Status |
+|---|---|---|
+| 1 | Data infrastructure, audit, leakage assessment | Complete |
+| 2 | Exploratory analysis, feature selection, WoE/IV, probability of default | In progress |
+| 3 | Macroeconomic integration: scenario weighting, through-the-cycle to point-in-time | Planned |
+| 4 | Basel IRB capital | Planned |
+| 5 | Independent validation layer in R | Planned |
+| 6 | Dashboard and persistence | Planned |
+| 7 | Validation memo | Planned |
+
+## Author
+
+**Somanjan Saha**, B.Sc. Economics (Econometrics Honours), University of Calcutta, aiming at credit risk analytics and model validation.
+[LinkedIn](https://www.linkedin.com/in/somanjan-saha) | [GitHub](https://github.com/somanjansahaweb)
