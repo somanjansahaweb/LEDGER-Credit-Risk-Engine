@@ -1,241 +1,171 @@
-import os 
-import sys 
+# ============================================================
+# IMPORTS
+# ============================================================
+import os
+import sys
+import sqlite3
 import pandas as pd 
-import numpy as np 
-import sqlite3 
-import optbinning 
+
+    
+# ============================================================
+# PATHS (defined once, used everywhere)
+# ============================================================ 
+csv_path = r"C:\Users\sahas\Downloads\final_macro_conditioned_msme_portfolio_50k (1).csv"
+db_path = r"C:\Users\sahas\Downloads\credit_risk_modelling.db"   # same absolute path in Phase 2
 
 
-# Phase 1: 
- 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__)) 
-DB_PATH = os.path.join(BASE_DIR, "credit_risk_modelling.db") 
-
-
-if not os.path.exists(DB_PATH):  
-    sys.exit(f"Database file not found at {DB_PATH}. Please ensure the database exists.") 
-
-try: 
-    with sqlite3.connect(DB_PATH) as conn: 
-        df = pd.read_sql_query("SELECT * FROM baseline_portfolio", conn, index_col="loan_id", parse_dates=["disbursement_date"])  
-except Exception as e: 
-    sys.exit(f"ERROR: Failed to read from the database: {e}")  
-
-print("SHAPE:", df.shape) 
-print("NULL COUNTS: ", df.isnull().sum().sum())   
- 
-default_count = int(df["default_flag"].sum()) 
-n_borrowers = df["borrower_id"].nunique()   
-num_df = df.select_dtypes(include=np.number)
-inf_counts = np.isinf(num_df).sum().sum() 
-
- 
-print("DEFAULT COUNT:", default_count) 
-print("UNIQUE BORROWERS:", n_borrowers) 
-print("INF VALUES COUNT: ", inf_counts)
-
-
-if df.shape!=(50000, 32) or df.isnull().sum().sum()!= 0 or default_count != 3379 or n_borrowers != 28566 or inf_counts != 0:  
-    sys.exit("ERROR: Dataframe shape or null counts or default counts or unique borrowers or infinite values do not match expected values.") 
-
-# 80/20 BORROWER SPLIT:  
-rng = np.random.default_rng(42) 
-unique_borrowers = df["borrower_id"].unique() 
-test_size = int(0.2*len(unique_borrowers)) 
-test_borrowers = rng.choice(unique_borrowers, size=test_size, replace=False)  
-test_mask = df["borrower_id"].isin(test_borrowers) 
-train = df[~test_mask].copy() 
-test = df[test_mask].copy()   
-print("Train count: ", len(train)) 
-print("Test count: ", len(test))  
-print("BORROWER COUNTS:", len(train["borrower_id"].unique()), len(test["borrower_id"].unique()))  
-print("DEFAULT RATE: ", train["default_flag"].mean(), test["default_flag"].mean())
-
-
-
-train_loans = len(train) 
-test_loans = len(test) 
-total_loans = train_loans + test_loans 
-print("TOTAL LOANS: ", total_loans) 
-if total_loans != 50000: 
-    sys.exit("ERROR: Total loans in train and test do not sum to 50000.") 
-
-
-     
-# Overlap Check  
-overlap = len(set(train["borrower_id"]) & set(test["borrower_id"])) 
-print("BORROWER OVERLAP: ", overlap) 
-if overlap != 0: 
-    sys.exit("STOP: borrower overlap, the split is broken")   
-     
-test_borrowers_path = os.path.join(BASE_DIR, "test_borrowers_scratch.csv") 
-pd.Series(test_borrowers, name="borrower_id").to_csv(test_borrowers_path, index=False)  
- 
-
-      
-# Column Taxonomy    
-
-num_cols =  [
-    "investment_in_plant_machinery", "annual_turnover", "loan_amount", "tenure_months", "interest_rate",
-    "monthly_revenue", "dscr", "current_ratio", "working_capital_days", "profit_margin",
-    "gst_turnover_avg_monthly", "existing_credit_lines", "banking_relationship_years",
-    "days_past_due_history_12m", "vintage_years", "active_loan_count", "repayment_track_score",
-    "gdp_growth_at_origination", "repo_rate_at_origination", "loan_to_turnover", "interest_burden",
-] 
-
-ord_cols = ["macro_scenario", "cibil_msme_rank"] 
-cat_cols = ["sector", "udyam_category", "collateral_type", "loan_purpose"]  
-
-print("\n _______DESCRIPTIVE STATISTICS_______") 
-print(train[num_cols].describe().T) 
-print("\n_____SKEWNESS CHECKING_____") 
-print(train[num_cols].skew().sort_values(key=abs, ascending=False))
-print(train[num_cols].nunique())  
- 
-for col in cat_cols + ord_cols: 
-    print("\n", col) 
-    print(train[col].value_counts(normalize=True).sort_index()) 
-
-# STRUCTURAL REDUNDANCY SCREENING  
-bank_gap = train["active_loan_count"] - train["existing_credit_lines"] 
-print("\nactive_loan_count - existing_credit_lines:", bank_gap.nunique(), "distinct gap(s)") 
- 
-ratio = train["monthly_revenue"] / train["annual_turnover"] 
-print("monthly revenue / annual turnover:", ratio.min(), ratio.max()) 
- 
-print(pd.crosstab(train["repo_rate_at_origination"], train["macro_scenario"])) 
-print(pd.crosstab(train["gdp_growth_at_origination"], train["macro_scenario"])) 
-
-# NEAR COPY DATA CHECKS  
-gst_ratio = train["gst_turnover_avg_monthly"] / train["annual_turnover"] 
-print("\ngst_turnover_avg_monthly / annual_turnover:", gst_ratio.min(), gst_ratio.max()) 
-
-years_gap = train["banking_relationship_years"] - train["vintage_years"]
-print("banking_relationship_years - vintage_years:", years_gap.min(), years_gap.max())   
-
-
-loan_check = train["loan_to_turnover"] * train["annual_turnover"]
-loan_ratio = train["loan_amount"] / loan_check
-print("loan_amount / (loan_to_turnover * annual_turnover):", loan_ratio.min(), loan_ratio.max())
-
-
-burden_check = (train["interest_rate"] / 100) * train["loan_to_turnover"]
-burden_ratio = train["interest_burden"] / burden_check
-print("interest_burden / ((interest_rate / 100) * loan_to_turnover):", burden_ratio.min(), burden_ratio.max())
-
-udyam_turnover = train.groupby("udyam_category")["annual_turnover"].agg(["min", "max", "count"])
-udyam_investment = train.groupby("udyam_category")["investment_in_plant_machinery"].agg(["min", "max", "count"])
-
-print("\nudyam_category vs annual_turnover min, max, count:\n", udyam_turnover)
-print("\nudyam_category vs investment_in_plant_machinery min, max, count:\n", udyam_investment)  
-
-# Dropping the columns  
-redundant_cols = [ 
-    "active_loan_count", 
-    "monthly_revenue", 
-    "repo_rate_at_origination", 
-    "gdp_growth_at_origination", 
-    "gst_turnover_avg_monthly", 
-    "banking_relationship_years", 
-    "loan_amount", 
-    "interest_burden", 
-    "udyam_category"
-] 
- 
-train = train.drop(columns=list(redundant_cols)) 
-test = test.drop(columns=list(redundant_cols)) 
-
-num_cols = [c for c in num_cols if c not in redundant_cols] 
-cat_cols = [c for c in cat_cols if c not in redundant_cols] 
-
-print("numeric + ordinal:", len(num_cols) + len(ord_cols))   
-print("categorical:", len(cat_cols))                          
-print("columns in train and test:", train.shape[1], test.shape[1])  
-
-if len(redundant_cols) != 9 or train.shape[1] != 23 or list(train.columns) != list(test.columns):
-    sys.exit("STOP: column counts are wrong")
-
-# BIVARIATE ANALYSIS  
-print("BIVARIATE_ANALYSIS VS DEFAULT_FLAG") 
-
-spearman = train[num_cols + ord_cols].corrwith(train["default_flag"], method="spearman")
-print(spearman.sort_values(key=abs, ascending=False)) 
-corr_df = spearman.to_frame("spearman_rho") 
-corr_df = corr_df.sort_values("spearman_rho", key=abs, ascending=False) 
-print(corr_df)
-corr_df["mean_default"] = train[train["default_flag"] == 1][corr_df.index].mean() 
-print(corr_df)
-
-# default_rate and lift per level  
-base_rate = train["default_flag"].mean()
-
-
-for col in ["cibil_msme_rank", "sector", "collateral_type", "loan_purpose"]:
-    lift = train.groupby(col)["default_flag"].mean() / base_rate
-    print("\nLIFT:", col)
-    print(lift.round(2))
-
-
-bank = df.loc[train.index, "banking_relationship_years"]
-vint = df.loc[train.index, "vintage_years"]
-gap = bank - vint
-default = train["default_flag"]
-
-print("\ngap vs vintage_years:", gap.corr(vint, method="spearman"))
-print("banking_relationship_years vs default:", bank.corr(default, method="spearman"))
-
-
-groups = pd.qcut(vint, 5)
-for g in groups.cat.categories:
-    mask = groups == g
-    print(g, gap[mask].corr(default[mask], method="spearman"))  
-
-#STEP 5: MULTICOLLINEARITY AND VIF SCRENNING  
-print("\nMULTICOLLINEARITY AND VIF SCREENING") 
-
-feature_cols = num_cols + ord_cols
-
-def get_vif(data):
-    corr = np.corrcoef(data, rowvar=False)           
-    inv_corr = np.linalg.inv(corr)                 
-    return pd.Series(np.diag(inv_corr), index=data.columns).sort_values(ascending=False)
-print(get_vif(train[feature_cols])) 
-
-vif = get_vif(train[feature_cols])
-if (vif < 1).any() or (vif > 10).any() or vif.isna().any():
-    sys.exit("STOP: VIF values are impossible or too high, check for copied columns")
-
-
-test_data = train[feature_cols].copy()
-test_data["fake_turnover"] = test_data["annual_turnover"] / 12
-
+# ============================================================
+# 1. DATA INGESTION
+# ============================================================
 try:
-    print(get_vif(test_data))
-except np.linalg.LinAlgError as e:
-    print("Matrix is singular, as expected:", e)
+    df = pd.read_csv(csv_path, index_col="loan_id")
+except FileNotFoundError:
+    print(f"File not found at {csv_path}. Please check the file path and try again.")
+    sys.exit()
+
+print(df.head())
+print(df.tail())
+print(df.shape)
+print(df.dtypes)
+print(df.info())
 
 
-#STEP 6: FINAL FEATURE MANIFEST  
-print("\n ----FINAL FEATURE MANIFEST------") 
-final_features = num_cols + ord_cols + cat_cols 
-
-# every feature must exist in both train and test
-missing = [c for c in final_features if c not in train.columns or c not in test.columns]
-if missing or len(final_features) != 18:
-    sys.exit(f"STOP: manifest problem, missing: {missing}, count: {len(final_features)}")
-
-manifest_path = os.path.join(BASE_DIR, "final_features_scratch.txt")  
-with open (manifest_path, "w") as f: 
-    f.write("\n".join(final_features))
-
-# read it back and compare with the list
-with open(manifest_path) as f:
-    saved = f.read().splitlines()
-
-print("FEATURES SAVED:", len(saved))
-if saved != final_features:
-    sys.exit("STOP: saved manifest does not match the feature list")
+# ============================================================
+# 2. DATA AUDITING  
+# ============================================================
 
 
+bad_dates = pd.to_datetime(df["disbursement_date"], errors="coerce").isnull().sum()
+print("Unparseable disbursement dates:", bad_dates)
 
 
+print(df.isnull().sum())
+
+
+if not df.index.is_unique:
+    print("STOP: duplicate loan_id found:", df.index.duplicated().sum())
+    sys.exit()
+print("UNIQUE LOAN_IDS: True")
+
+
+dup_col = ["borrower_id", "disbursement_date", "loan_amount", "interest_rate", "tenure_months"]
+dup_mask = df.duplicated(subset=dup_col, keep=False)   
+print("DUPLICATE ROWS:", dup_mask.sum())
+print(df[dup_mask].sort_values(dup_col).head(10))
+
+
+print("UNIQUE BORROWERS:", df["borrower_id"].nunique())
+print("UNIQUE MACRO SCENARIOS:", df["macro_scenario"].unique())
+print("UNIQUE IRAC STAGES:", df["irac_stage"].unique())
+print("UNIQUE CIBIL MSME RANKS:", df["cibil_msme_rank"].unique())
+
+
+print(df["default_flag"].value_counts(normalize=True))
+
+
+risk_cols = ["dscr", "current_ratio", "profit_margin",
+             "repayment_track_score", "days_past_due_history_12m"]
+print(df.groupby("default_flag")[risk_cols].agg(["mean", "median"]).T)
+
+# --- Leakage check 1:-
+print(pd.crosstab(df["irac_stage"], df["default_flag"]))
+
+# --- Leakage check 2:-
+
+print(df.groupby("irac_stage")["dpd_current"].agg(["min", "max"]))
+
+print(df.describe())
+
+
+# ============================================================
+# 3. CLEANING  
+# ============================================================
+
+
+df["disbursement_date"] = pd.to_datetime(df["disbursement_date"], errors="coerce")
+
+
+for col in ["sector", "udyam_category"]:
+    df[col] = df[col].astype("category")
+
+
+for col in ["collateral_type", "loan_purpose"]:
+    df[col] = df[col].str.strip().str.upper()
+    df[col] = df[col].astype("category")
+
+
+df["cibil_msme_rank"] = pd.to_numeric(
+    df["cibil_msme_rank"].str.replace("CMR", "", regex=False), errors="coerce"
+)
+if df["cibil_msme_rank"].isnull().any():
+    print("STOP: unparseable cibil_msme_rank values:", df["cibil_msme_rank"].isnull().sum())
+    sys.exit()
+df["cibil_msme_rank"] = df["cibil_msme_rank"].astype(int)
+
+
+
+def encode_ordinal(series, mapping, name):
+    encoded = series.map(mapping)
+    n_null = encoded.isnull().sum()
+    print(f"Nulls after {name} mapping:", n_null)
+    if n_null > 0:
+        print(f"STOP: unmapped values in {name}")
+        sys.exit()
+    return encoded.astype(int)
+
+
+df["macro_scenario"] = encode_ordinal(
+    df["macro_scenario"], {"Baseline": 0, "Adverse": 1, "Severe": 2}, "macro_scenario"
+)
+
+
+df["irac_stage"] = encode_ordinal(
+    df["irac_stage"],
+    {"Standard": 1, "SMA-0": 2, "SMA-1": 3, "SMA-2": 4, "NPA": 5},
+    "irac_stage",
+)
+
+
+# ============================================================
+# 4. RATIO ENGINEERING
+# ============================================================
+
+
+n_zero = (df["annual_turnover"] == 0).sum()
+print("Rows with zero annual_turnover:", n_zero)
+if n_zero > 0:
+    print("STOP: zero turnover rows found. Decide flag-vs-drop before computing ratios.")
+    sys.exit()
+
+df["loan_to_turnover"] = df["loan_amount"] / df["annual_turnover"]
+print(df["loan_to_turnover"].describe())
+
+df["interest_burden"] = (
+    df["loan_amount"] * df["interest_rate"] / 100 / df["annual_turnover"]
+)
+print(df["interest_burden"].describe())
+
+
+# ============================================================
+# 5. DATA PERSISTENCE (SQLite)
+# ============================================================
+with sqlite3.connect(db_path) as conn:
+    try:
+        df.to_sql("baseline_portfolio", conn, if_exists="replace")
+        print("Persisted to baseline_portfolio successfully.")
+    except sqlite3.OperationalError as e:
+        print(f"Error occurred while writing to the database: {e}")
+        sys.exit()
+
+
+# ============================================================
+# 6. VERIFICATION 
+# ============================================================
+
+print("DB size (MB):", round(os.path.getsize(db_path) / 1_000_000, 2))   
+with sqlite3.connect(db_path) as conn:
+    n_rows = conn.execute("SELECT COUNT(*) FROM baseline_portfolio").fetchone()[0]
+print("Rows in baseline_portfolio:", n_rows)                              
+if n_rows != len(df):
+    print("STOP: row count in DB does not match the dataframe.")
+    sys.exit()
