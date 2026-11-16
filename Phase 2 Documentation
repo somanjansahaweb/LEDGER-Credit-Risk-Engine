@@ -1,0 +1,78 @@
+# LEDGER — MSME Credit Risk & IFRS 9 PD Modeling Engine
+
+**LEDGER** is a quantitative credit risk modeling engine built from scratch in Python (`pandas`, `numpy`, `sqlite3`) for Indian MSME loan portfolios. It implements bank-grade data validation, borrower-level partitioning, structural multicollinearity screening, and leakage-free Weight of Evidence (WoE) / Information Value (IV) feature engineering aligned with **RBI IRAC** norms and **IFRS 9 / Basel IRB** scorecard standards.
+
+---
+
+## Project Architecture & Roadmap
+
+- [x] **Phase 1:** SQLite Portfolio Ingestion & Baseline Schema (`baseline_portfolio` — 50,000 MSME facilities across 28,566 unique borrowers)
+- [x] **Phase 2 (Level 1):** Data Integrity Guardrails, Borrower-Level Split & Structural Redundancy Screening
+- [x] **Phase 2 (Level 2):** IV Feature Pruning, RBI Udyam Tier Consolidation, Leak-Free WoE Transformation & Post-WoE VIF Validation
+- [ ] **Phase 3 (Upcoming — Semester 4):** Logistic Regression PD Scorecard, Gini / ROC-AUC Validation, PDO Score Scaling & IFRS 9 Stage 1/2/3 Expected Credit Loss (ECL) Engine
+
+---
+
+## Phase 2: Exploratory Data Analysis, Feature Screening & WoE Pipeline (`Phase-2_EDA.py`)
+
+### Level 1: Data Integrity, Borrower Split & Structural Screening
+
+1. **Deterministic Ingestion & Hard Assertions:**
+   - Queries `baseline_portfolio` from `credit_risk_modelling.db` (`50,000` loans, `32` columns, `3,379` defaults, `28,566` unique borrowers).
+   - Enforces automated `sys.exit` guardrails verifying exact row/column dimensions, zero null values, zero infinite values, and exact target counts prior to analysis.
+
+2. **Leakage-Free 80/20 Borrower-Level Partitioning:**
+   - Splits on `unique_borrowers` (`seed=42`) rather than individual loan rows so multi-facility MSME borrowers cannot appear in both `train` and `test`.
+   - Enforces a hard `overlap == 0` assertion between `train["borrower_id"]` and `test["borrower_id"]` and verifies balanced default rates across splits.
+
+3. **Algebraic & Structural Redundancy Elimination:**
+   - Audited numeric, ordinal, and categorical taxonomies for exact mathematical identities and near-copy columns prior to modeling.
+   - Pruned **9 structurally redundant variables** that induce singular correlation matrices:
+     - `active_loan_count` (exact shift of `existing_credit_lines`)
+     - `monthly_revenue` (exact multiple of `annual_turnover`)
+     - `repo_rate_at_origination` & `gdp_growth_at_origination` (1-to-1 deterministic mappings of `macro_scenario`)
+     - `gst_turnover_avg_monthly` (near-copy ratio of `annual_turnover`)
+     - `banking_relationship_years` (redundant with `vintage_years`)
+     - `loan_amount` & `interest_burden` (exact algebraic products of `loan_to_turnover`, `annual_turnover`, and `interest_rate`)
+   - Segregated post-origination delinquency fields (`dpd_current`, `irac_stage`) and identifiers (`borrower_id`, `disbursement_date`) out of the PD predictor matrix to prevent target leakage and reserve them for downstream **IFRS 9 Stage 1/2/3** classification.
+
+4. **Bivariate Lift & Pure NumPy VIF Diagnostics:**
+   - Evaluated Spearman rank correlations and default-rate lift across candidate predictors.
+   - Implemented matrix-inversion Variance Inflation Factor ($\text{VIF} = \text{diag}(R^{-1})$) directly in `numpy` (`np.corrcoef` + `np.linalg.inv`) with singular-matrix stress testing.
+
+---
+
+### Level 2: IV Screening, Udyam Tiering & Leak-Free WoE Transformation
+
+1. **Train-Only WoE Binning & Information Value (IV) Screening:**
+   - Computed 5-bin quantile cuts (`pd.qcut`) for continuous variables and category groupings for discrete variables strictly on the `train` split.
+   - Applied **Laplace smoothing (`+0.5`)** to Good and Bad counts to prevent $\ln(0)$ instability and ranked all predictors by Information Value:
+     $$\text{WoE}_i = \ln\left(\frac{\text{Good Share}_i}{\text{Bad Share}_i}\right), \quad \text{IV} = \sum_{i} (\text{Good Share}_i - \text{Bad Share}_i) \times \text{WoE}_i$$
+   - Pruned **10 low-signal noise features** (`IV < 0.02`): `loan_purpose`, `existing_credit_lines`, `working_capital_days`, `interest_rate`, `current_ratio`, `loan_to_turnover`, `profit_margin`, `tenure_months`, `repayment_track_score`, and `days_past_due_history_12m`.
+
+2. **Domain-Grounded MSME Scale Consolidation (RBI Udyam Tiers):**
+   - Detected strong rank redundancy between `annual_turnover` and `investment_in_plant_machinery` (**Spearman $\rho = 0.7518$**).
+   - Dropped both raw continuous size columns and replaced them with official **RBI Udyam classification** (`udyam_category`), capturing a strictly monotonic risk step function across MSME tiers:
+     - **Micro:** `7.64%` default rate
+     - **Small:** `5.75%` default rate
+     - **Medium:** `3.86%` default rate
+
+3. **Zero-Leakage Out-of-Sample Mapping & Orthogonal Post-WoE VIF:**
+   - Extended training quantile bin cutoffs to `[-inf, ..., +inf]` (`labels=False`) and mapped `train`-derived WoE lookup dictionaries onto both `X_train_woe` and `X_test_woe`, achieving **0 `NaN` values** across all features and splits.
+   - Re-ran pure `numpy`/`pandas` correlation matrix inversion on `X_train_woe`, confirming **complete orthogonality (`VIF ≈ 1.000`)** across all **7 final predictors**:
+
+| Final Feature | Type | Post-WoE VIF |
+| :--- | :--- | :---: |
+| `dscr` | Numerical (5-Bin WoE) | `1.000192` |
+| `collateral_type` | Categorical (WoE) | `1.000155` |
+| `udyam_category` | Categorical / RBI Tier (WoE) | `1.000089` |
+| `cibil_msme_rank` | Ordinal (WoE) | `1.000084` |
+| `sector` | Categorical (WoE) | `1.000069` |
+| `vintage_years` | Numerical (5-Bin WoE) | `1.000041` |
+| `macro_scenario` | Ordinal (WoE) | `1.000029` |
+
+---
+
+## Tech Stack
+- **Language:** Python 3.14
+- **Core Libraries:** `pandas`, `numpy`, `sqlite3` (zero black-box modeling wrappers; all statistical, WoE/IV, and VIF computations written explicitly from first principles)
