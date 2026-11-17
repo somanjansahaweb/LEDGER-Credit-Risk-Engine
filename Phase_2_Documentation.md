@@ -65,7 +65,7 @@ Ten further candidates (payment history, repayment score, current ratio, margins
 ## Setup
 
 ```bash
-pip install pandas numpy scipy optbinning
+pip install pandas numpy scipy 
 ```
 
 1. Set `csv_path` and `db_path` in `Credit_Risk_Modelling.py`, then run it to build `credit_risk_modelling.db`.
