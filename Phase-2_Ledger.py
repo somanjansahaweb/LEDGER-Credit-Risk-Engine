@@ -3,7 +3,7 @@ import sys
 import pandas as pd 
 import numpy as np 
 import sqlite3 
-from optbinning import OptimalBinning
+import pickle
 
 
 # Phase 1: 
@@ -240,201 +240,140 @@ if saved != final_features:
 
 print("\n ----WOE BINNING AND INFORMATION VALUE---- ")  
 
-y = train["default_flag"]
-total_bads = y.sum()
-total_goods = len(y) - total_bads
-print("TOTAL GOODS:", total_goods, "TOTAL BADS:", total_bads)
+USE_MACRO = True 
+IV_CUTOFF = 0.02 
+
+raw_train = df.loc[train.index] 
+raw_test = df.loc[test.index] 
+y_train = raw_train["default_flag"] 
+y_test = raw_test["default_flag"]
+
+def woe_table(bins,y): 
+    grp = y.groupby(bins, observed=True) 
+    tbl = pd.DataFrame({"loans": grp.count(), "bads": grp.sum()}) 
+    tbl["goods"] = tbl["loans"] - tbl["bads"] 
+    tbl["default_rate"] = tbl["bads"] / tbl["loans"] 
+
+    smooth_goods = tbl["goods"] + 0.5 
+    smooth_bads = tbl["bads"] + 0.5  
+    tbl["good_share"] = smooth_goods / smooth_goods.sum() 
+    tbl["bad_share"] = smooth_bads / smooth_bads.sum() 
+
+    tbl["woe"] = np.log(tbl["good_share"] / tbl["bad_share"])
+    tbl["iv"] = (tbl["good_share"] - tbl["bad_share"]) * tbl["woe"]
+    return tbl
 
 
-bins = pd.qcut(train["dscr"], 5)
 
-table = pd.DataFrame({
-    "loans": y.groupby(bins, observed=True).count(),
-    "bads": y.groupby(bins, observed=True).sum(),
-})
-table["goods"] = table["loans"] - table["bads"]
-table["default_rate"] = table["bads"] / table["loans"]
-print(table) 
 
-table["good_shares"] = table["goods"]/total_goods 
-table["bad_shares"] = table["bads"]/total_bads
+num_cands = [
+    "dscr", "vintage_years", "investment_in_plant_machinery", "annual_turnover",
+    "tenure_months", "interest_rate", "current_ratio", "working_capital_days",
+    "profit_margin", "existing_credit_lines", "days_past_due_history_12m",
+    "repayment_track_score", "loan_to_turnover",
+]
+cat_cands = [
+    "macro_scenario", "cibil_msme_rank", "sector",
+    "collateral_type", "loan_purpose", "udyam_category",
+]
 
-table["woe"] = np.log(table["good_shares"]/table["bad_shares"]) 
- 
-table["iv"] = (table["good_shares"] - table["bad_shares"]) * table["woe"]
-print(table[["good_shares", "bad_shares", "woe", "iv"]])
-print("IV of dscr:", table["iv"].sum())
- 
-num_bins = [ 
-    "investment_in_plant_machinery", 
-    "annual_turnover", 
-    "tenure_months", 
-    "interest_rate", 
-    "current_ratio", 
-    "working_capital_days", 
-    "profit_margin", 
-    "existing_credit_lines", 
-    "days_past_due_history_12m", 
-    "vintage_years", 
-    "repayment_track_score", 
-    "loan_to_turnover" 
-] 
 
-for col in num_bins:
-    woe_bin = pd.qcut(train[col], 5, duplicates="drop")
-    num_table = pd.DataFrame({
-        "loans": y.groupby(woe_bin, observed=True).count(),
-        "bads": y.groupby(woe_bin, observed=True).sum(),
-    })
-    num_table["goods"] = num_table["loans"] - num_table["bads"]
-    num_table["default_rate"] = num_table["bads"] / num_table["loans"]
-    print(num_table)
-    smooth_goods = num_table["goods"] + 0.5
-    smooth_bads = num_table["bads"] + 0.5
-    num_table["good_shares"] = smooth_goods / smooth_goods.sum()
-    num_table["bad_shares"] = smooth_bads / smooth_bads.sum()
-    num_table["woe"] = np.log(num_table["good_shares"] / num_table["bad_shares"])
-    num_table["iv"] = (num_table["good_shares"] - num_table["bad_shares"]) * num_table["woe"]
+tables = {} 
+woe_maps ={} 
+edges_map ={} 
+train_bins ={} 
+test_bins={} 
+iv_summary = {} 
 
-    print(num_table[["good_shares", "bad_shares", "woe", "iv"]])
-    print(f"IV of {col}: {num_table['iv'].sum():.6f}")
+for col in num_cands: 
+    _, edges = pd.qcut(raw_train[col], q=5, retbins=True, duplicates="drop") 
+    edges[0], edges[-1] = -np.inf, np.inf 
+    edges_map[col] = edges.tolist() 
 
-cat_ord_cols = [ 
-    "macro_scenario",  
-    "cibil_msme_rank", 
-    "sector", 
-    "collateral_type", 
-    "loan_purpose"
-] 
-for col in cat_ord_cols: 
-    cat_ord_bin = y.groupby(train[col], observed=True)  
-    cat_ord_table = pd.DataFrame({ 
-        "loans": cat_ord_bin.count(),
-        "bads": cat_ord_bin.sum(),
+    train_bins[col] = pd.cut(raw_train[col], bins=edges, labels=False) 
+    test_bins[col] = pd.cut(raw_test[col], bins=edges, labels=False)  
+
+for col in cat_cands: 
+    train_bins[col] = raw_train[col] 
+    test_bins[col] = raw_test[col] 
+
+for col in num_cands+cat_cands: 
+    tables[col] = woe_table(train_bins[col], y_train) 
+    woe_maps[col] = tables[col]["woe"].to_dict() 
+    iv_summary[col] = tables[col]["iv"].sum() 
+
+
+iv_series = pd.Series(iv_summary).sort_values(ascending=False) 
+print("\nIV RANKING (train):\n", iv_series.round(4))
+print("\nBins surviving per numeric feature:")
+print({c: len(tables[c]) for c in num_cands})   
+
+
+
+keep = iv_series[iv_series >= IV_CUTOFF].index.tolist()
+
+keep = [c for c in keep if c not in ("annual_turnover", "investment_in_plant_machinery")]
+
+if not USE_MACRO and "macro_scenario" in keep:
+    keep.remove("macro_scenario")
+
+if "udyam_category" not in keep:
+    print("WARNING: udyam_category IV below cutoff, size info is now missing from the model")
+
+print("\nFINAL FEATURES:", keep)
+
+
+X_train_woe = pd.DataFrame(
+    {c: train_bins[c].map(woe_maps[c]).astype(float) for c in keep}, index=train.index
+)
+X_test_woe = pd.DataFrame(
+    {c: test_bins[c].map(woe_maps[c]).astype(float) for c in keep}, index=test.index
+)
+
+print("\nTrain NaNs:\n", X_train_woe.isna().sum())
+print("Test NaNs:\n", X_test_woe.isna().sum())  
+
+for c in keep:  
+    comp = pd.DataFrame({ 
+        "train_rate":y_train.groupby(train_bins[c], observed=True).mean(), 
+        "test_rate": y_test.groupby(test_bins[c], observed=True).mean(), 
+        "test_bads": y_test.groupby(test_bins[c], observed=True).sum(),
     }) 
-    cat_ord_table["goods"] = cat_ord_table["loans"] - cat_ord_table["bads"] 
-    cat_ord_table["default_rate"] = cat_ord_table["bads"] / cat_ord_table["loans"] 
-    print(cat_ord_table) 
-    smooth_goods = cat_ord_table["goods"] + 0.5 
-    smooth_bads = cat_ord_table["bads"] + 0.5  
-    cat_ord_table["good_shares"] = smooth_goods / smooth_goods.sum()
-    cat_ord_table["bad_shares"] = smooth_bads / smooth_bads.sum()
-    cat_ord_table["woe"] = np.log(cat_ord_table["good_shares"] / cat_ord_table["bad_shares"])
-    cat_ord_table["iv"] = (cat_ord_table["good_shares"] - cat_ord_table["bad_shares"]) * cat_ord_table["woe"] 
-    
-    print(cat_ord_table[["good_shares", "bad_shares", "woe", "iv"]])
-    print(f"IV of {col}: {cat_ord_table['iv'].sum():.6f}")
- 
-# column drop 
-low_iv_cols = [
-    "loan_purpose",
-    "existing_credit_lines",
-    "working_capital_days",
-    "interest_rate",
-    "current_ratio",
-    "loan_to_turnover",
-    "profit_margin",
-    "tenure_months",
-    "repayment_track_score",
-    "days_past_due_history_12m", 
-    
-]
 
-train = train.drop(columns=low_iv_cols)
-test = test.drop(columns=low_iv_cols)
+    rank_correlation = comp["train_rate"].corr(comp["test_rate"], method="spearman")  
+    print(f"\n{c}  (rank agreement train vs test: {rank_correlation:.2f})")
+    print(comp.round(4))
 
-print("Remaining train columns:", train.columns.tolist())
-print("Remaining test columns:", test.columns.tolist()) 
+print("\nCorrelation of each WoE feature with default_flag (all should be negative):")
+print(X_train_woe.corrwith(y_train).round(3))
 
- 
-print(df.loc[train.index].groupby("udyam_category", observed=True)["default_flag"].mean())  
-print(df.loc[test.index].groupby("udyam_category", observed=True)["default_flag"].mean()) 
-
- 
-print(train["annual_turnover"].corr(train["investment_in_plant_machinery"], method="spearman"))  
-spear_drop = ["annual_turnover", 
-         "investment_in_plant_machinery"] 
-train = train.drop(columns=spear_drop) 
-test = test.drop(columns=spear_drop)  
-print("Remaining train columns:", train.columns.tolist())
-print("Remaining test columns:", test.columns.tolist()) 
- 
-num_cols = ["dscr", "vintage_years"]
-
-cat_ord_cols = [
-    "cibil_msme_rank",
-    "macro_scenario",
-    "collateral_type",
-    "sector",
-    "udyam_category",
-]
-
-train["udyam_category"] = df.loc[train.index, "udyam_category"]
-test["udyam_category"] = df.loc[test.index, "udyam_category"]
-
-X_train_woe = pd.DataFrame(index=train.index)
-X_test_woe = pd.DataFrame(index=test.index)
-woe_maps = {}
-
-y_train = train["default_flag"]
+corr_matrix = X_train_woe.corr()
+vif_df = pd.DataFrame({
+    "feature": X_train_woe.columns,
+    "VIF": np.diag(np.linalg.inv(corr_matrix.values)),
+}).sort_values("VIF", ascending=False)
+print(vif_df)
 
 
-for col in num_cols:
-    _, edges = pd.qcut(train[col], q=5, retbins=True, duplicates="drop")
-    edges[0], edges[-1] = -np.inf, np.inf
-    train_binned = pd.cut(train[col], bins=edges, labels=False)
-    test_binned = pd.cut(test[col], bins=edges, labels=False)
-
-    num_grp = y_train.groupby(train_binned, observed=True)
-
-    tbl = pd.DataFrame({"loans": num_grp.count(), "bads": num_grp.sum()})
-    tbl["goods"] = tbl["loans"] - tbl["bads"]
-
-    smooth_goods = tbl["goods"] + 0.5
-    smooth_bads = tbl["bads"] + 0.5
-
-    tbl["good_shares"] = smooth_goods / smooth_goods.sum()
-    tbl["bad_shares"] = smooth_bads / smooth_bads.sum()
-    tbl["woe"] = np.log(tbl["good_shares"] / tbl["bad_shares"])
-
-    woe_dict = tbl["woe"].to_dict()
-    woe_maps[col] = woe_dict
-    X_train_woe[col] = train_binned.map(woe_dict).astype(float)
-    X_test_woe[col] = test_binned.map(woe_dict).astype(float)
 
 
-for col in cat_ord_cols:
-    cat_grp = y_train.groupby(train[col], observed=True)
-    tbl = pd.DataFrame({"loans": cat_grp.count(), "bads": cat_grp.sum()})
-    tbl["goods"] = tbl["loans"] - tbl["bads"]
-
-    smooth_goods = tbl["goods"] + 0.5
-    smooth_bads = tbl["bads"] + 0.5
-
-    tbl["good_shares"] = smooth_goods / smooth_goods.sum()
-    tbl["bad_shares"] = smooth_bads / smooth_bads.sum()
-    tbl["woe"] = np.log(tbl["good_shares"] / tbl["bad_shares"])
-
-    woe_dict = tbl["woe"].to_dict()
-    woe_maps[col] = woe_dict
-
-    X_train_woe[col] = train[col].map(woe_dict).astype(float)
-    X_test_woe[col] = test[col].map(woe_dict).astype(float)
-
-print("X_train_woe NaNs:\n", X_train_woe.isna().sum())
-print("X_test_woe NaNs:\n", X_test_woe.isna().sum())
-print("\nX_train_woe preview:\n", X_train_woe.head()) 
- 
-corr_matrix = X_train_woe.corr() 
-vif_values = np.diag(np.linalg.inv(corr_matrix.values)) 
-vif_df = pd.DataFrame({ 
-    "feature": X_train_woe.columns, 
-    "VIF": vif_values
-}).sort_values("VIF", ascending=False)  
-
-print(vif_df) 
- 
 if X_train_woe.isna().sum().sum() != 0 or X_test_woe.isna().sum().sum() != 0:
     sys.exit("STOP: NaNs detected in WoE-transformed matrices")
 if (vif_df["VIF"] > 5.0).any():
     sys.exit("STOP: Post-WoE VIF exceeds threshold") 
+
+
+
+leaky = ["dpd_current", "irac_stage", "default_flag"]
+if any(c in keep for c in leaky):
+    sys.exit("STOP: leaky column in final features")
+
+
+
+if not (list(X_train_woe.columns) == list(X_test_woe.columns) == keep):
+    sys.exit("STOP: train/test WoE columns do not match the feature list")
+
+print("FINAL FEATURES:", len(keep), keep)
+
+
+
