@@ -1,22 +1,14 @@
-# ============================================================
-# IMPORTS
-# ============================================================
 import os
 import sys
 import sqlite3
 import pandas as pd 
 
-    
-# ============================================================
-# PATHS (defined once, used everywhere)
-# ============================================================ 
+#INGESTION    
+
 csv_path = r"C:\Users\sahas\Downloads\final_macro_conditioned_msme_portfolio_50k (1).csv"
-db_path = r"C:\Users\sahas\Downloads\credit_risk_modelling.db"   # same absolute path in Phase 2
+db_path = r"C:\Users\sahas\Downloads\Phase_1_Ledger.db"    
 
 
-# ============================================================
-# 1. DATA INGESTION
-# ============================================================
 try:
     df = pd.read_csv(csv_path, index_col="loan_id")
 except FileNotFoundError:
@@ -29,11 +21,7 @@ print(df.shape)
 print(df.dtypes)
 print(df.info())
 
-
-# ============================================================
-# 2. DATA AUDITING  
-# ============================================================
-
+#AUDITING
 
 bad_dates = pd.to_datetime(df["disbursement_date"], errors="coerce").isnull().sum()
 print("Unparseable disbursement dates:", bad_dates)
@@ -67,20 +55,12 @@ risk_cols = ["dscr", "current_ratio", "profit_margin",
              "repayment_track_score", "days_past_due_history_12m"]
 print(df.groupby("default_flag")[risk_cols].agg(["mean", "median"]).T)
 
-# --- Leakage check 1:-
 print(pd.crosstab(df["irac_stage"], df["default_flag"]))
-
-# --- Leakage check 2:-
-
 print(df.groupby("irac_stage")["dpd_current"].agg(["min", "max"]))
-
 print(df.describe())
 
 
-# ============================================================
-# 3. CLEANING  
-# ============================================================
-
+# CLEANING
 
 df["disbursement_date"] = pd.to_datetime(df["disbursement_date"], errors="coerce")
 
@@ -125,11 +105,7 @@ df["irac_stage"] = encode_ordinal(
     "irac_stage",
 )
 
-
-# ============================================================
-# 4. RATIO ENGINEERING
-# ============================================================
-
+#RATIO ENGINEERING
 
 n_zero = (df["annual_turnover"] == 0).sum()
 print("Rows with zero annual_turnover:", n_zero)
@@ -146,9 +122,8 @@ df["interest_burden"] = (
 print(df["interest_burden"].describe())
 
 
-# ============================================================
-# 5. DATA PERSISTENCE (SQLite)
-# ============================================================
+#DATA PERSISTENCE
+
 with sqlite3.connect(db_path) as conn:
     try:
         df.to_sql("baseline_portfolio", conn, if_exists="replace")
@@ -157,10 +132,6 @@ with sqlite3.connect(db_path) as conn:
         print(f"Error occurred while writing to the database: {e}")
         sys.exit()
 
-
-# ============================================================
-# 6. VERIFICATION 
-# ============================================================
 
 print("DB size (MB):", round(os.path.getsize(db_path) / 1_000_000, 2))   
 with sqlite3.connect(db_path) as conn:
